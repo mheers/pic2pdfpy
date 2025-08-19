@@ -34,7 +34,10 @@ class Doc2PDFApp:
         self.canvas.bind("<Button-1>", self.on_click)
         self.preview_label = tk.Label(self.main_frame, text="Preview:")
         self.preview_label.pack(side=tk.TOP, padx=10)
-        self.preview_canvas = tk.Canvas(self.main_frame, width=800, height=600, bg='white')
+        # DIN A4 aspect ratio: 210mm x 297mm, scale to fit nicely in the UI
+        self.a4_preview_width = 420  # px
+        self.a4_preview_height = 594  # px (A4 ratio)
+        self.preview_canvas = tk.Canvas(self.main_frame, width=self.a4_preview_width, height=self.a4_preview_height, bg='white')
         self.preview_canvas.pack(side=tk.RIGHT, padx=10)
         self.dragging_point = None
         self.canvas.bind('<ButtonPress-1>', self.on_click)
@@ -91,7 +94,7 @@ class Doc2PDFApp:
             return
         img_cv = cv2.cvtColor(np.array(self.img), cv2.COLOR_RGB2BGR)
         pts_src = np.array(self.points, dtype='float32')
-        preview_width, preview_height = 800, 600
+        preview_width, preview_height = self.a4_preview_width, self.a4_preview_height
         pts_dst = np.array([
             [0, 0],
             [preview_width-1, 0],

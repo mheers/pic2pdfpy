@@ -1,5 +1,7 @@
 # Document to DIN A4 PDF GUI
 
+> Disclaimer: this tool has been vibe coded using GitHub Copilot in Agent Mode.
+
 This Python program lets you load a photo (PNG/JPEG) of a document, click on the edges of the document in the image, and generate a DIN A4 PDF based on those edges.
 
 ## Features
