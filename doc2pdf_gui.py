@@ -25,9 +25,17 @@ class Doc2PDFApp:
         self.load_btn.pack(side=tk.LEFT)
         self.save_btn = tk.Button(self.frame, text="Generate PDF", command=self.generate_pdf, state=tk.DISABLED)
         self.save_btn.pack(side=tk.LEFT)
-        self.canvas = tk.Canvas(self.root, width=800, height=600, bg='gray')
-        self.canvas.pack()
+        self.tip_label = tk.Label(self.root, text="Tip: Click the document corners in this order: Top-Left, Top-Right, Bottom-Right, Bottom-Left.", fg="blue")
+        self.tip_label.pack()
+        self.main_frame = tk.Frame(self.root)
+        self.main_frame.pack(fill=tk.BOTH, expand=True)
+        self.canvas = tk.Canvas(self.main_frame, width=800, height=600, bg='gray')
+        self.canvas.pack(side=tk.LEFT)
         self.canvas.bind("<Button-1>", self.on_click)
+        self.preview_label = tk.Label(self.main_frame, text="Preview:")
+        self.preview_label.pack(side=tk.TOP, padx=10)
+        self.preview_canvas = tk.Canvas(self.main_frame, width=210, height=297, bg='white')  # A4 at 72dpi
+        self.preview_canvas.pack(side=tk.RIGHT, padx=10)
 
     def load_image(self):
         filetypes = [("Image files", "*.png *.jpg *.jpeg")]
@@ -41,15 +49,41 @@ class Doc2PDFApp:
             self.canvas_img = self.canvas.create_image(0, 0, anchor=tk.NW, image=self.tk_img)
             self.points = []
             self.save_btn.config(state=tk.DISABLED)
+            self.preview_canvas.delete("all")
 
     def on_click(self, event):
         if self.img is None:
             return
         if len(self.points) < 4:
             self.points.append((event.x, event.y))
-            self.canvas.create_oval(event.x-5, event.y-5, event.x+5, event.y+5, fill='red')
+            # Draw a numbered circle for each click
+            self.canvas.create_oval(event.x-10, event.y-10, event.x+10, event.y+10, fill='red')
+            self.canvas.create_text(event.x, event.y, text=str(len(self.points)), fill='white', font=('Arial', 12, 'bold'))
         if len(self.points) == 4:
             self.save_btn.config(state=tk.NORMAL)
+            self.update_preview()
+    def update_preview(self):
+        # Perspective transform for preview
+        if len(self.points) != 4 or self.img is None:
+            self.preview_canvas.delete("all")
+            return
+        img_cv = cv2.cvtColor(np.array(self.img), cv2.COLOR_RGB2BGR)
+        pts_src = np.array(self.points, dtype='float32')
+        a4_width_px, a4_height_px = 210, 297  # Preview size (A4 at 72dpi)
+        pts_dst = np.array([
+            [0, 0],
+            [a4_width_px-1, 0],
+            [a4_width_px-1, a4_height_px-1],
+            [0, a4_height_px-1]
+        ], dtype='float32')
+        M = cv2.getPerspectiveTransform(pts_src, pts_dst)
+        warped = cv2.warpPerspective(img_cv, M, (a4_width_px, a4_height_px))
+        warped_rgb = cv2.cvtColor(warped, cv2.COLOR_BGR2RGB)
+        preview_img = Image.fromarray(warped_rgb)
+        preview_tk = ImageTk.PhotoImage(preview_img)
+        self.preview_canvas.delete("all")
+        self.preview_canvas.create_image(0, 0, anchor=tk.NW, image=preview_tk)
+        self.preview_canvas.image = preview_tk  # Keep reference
 
     def generate_pdf(self):
         if len(self.points) != 4 or self.img is None:
