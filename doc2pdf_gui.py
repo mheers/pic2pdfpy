@@ -1,6 +1,9 @@
+#!/usr/bin/env python3
 """
 doc2pdf_gui.py  –  Document to DIN A4 PDF converter
 Drop or open an image, click the four document corners, export to PDF.
+
+Requires Python 3.10+.
 
 Drag-and-drop requires tkinterdnd2:
     pip install tkinterdnd2
@@ -9,13 +12,14 @@ Without it the app still works fine via the "Open Image" button.
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-from PIL import Image, ImageTk
+from PIL import Image, ImageOps, ImageTk
 import cv2
 import numpy as np
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas as pdf_canvas
 import os
 import tempfile
+import threading
 from urllib.request import url2pathname
 from urllib.parse import urlparse
 
@@ -91,6 +95,9 @@ class Doc2PDFApp:
     CANVAS_W = 760
     CANVAS_H = 570
     PREV_MIN_W = 220   # minimum preview panel width
+    DETECT_MAX_DIM = 900   # longest side fed to the corner detector
+    DPI_CHOICES = (150, 200, 300)
+    JPEG_QUALITY = 90
 
     def __init__(self, root: tk.Tk):
         self.root = root
@@ -109,6 +116,9 @@ class Doc2PDFApp:
         self.dragging_point: int | None = None
         self._drop_active   = False
         self._dnd_loaded    = False
+        self._src_resize_job: str | None = None
+        self._prev_resize_job: str | None = None
+        self._exporting     = False
 
         self._build_styles()
         self._build_ui()
@@ -214,6 +224,11 @@ class Doc2PDFApp:
             command=self.load_image)
         self.open_btn.pack(fill=tk.X, pady=(0, 8))
 
+        self.detect_btn = ttk.Button(
+            inner, text="Auto-detect corners", style="Ghost.TButton",
+            command=self.autodetect_corners, state=tk.DISABLED)
+        self.detect_btn.pack(fill=tk.X, pady=(0, 8))
+
         self.save_btn = ttk.Button(
             inner, text="Export PDF…", style="Primary.TButton",
             command=self.generate_pdf, state=tk.DISABLED)
@@ -223,7 +238,21 @@ class Doc2PDFApp:
         self.quicksave_btn = ttk.Button(
             inner, text="Save as .pdf (same path)", style="Ghost.TButton",
             command=self.quicksave_pdf, state=tk.DISABLED)
-        self.quicksave_btn.pack(fill=tk.X, pady=(0, 16))
+        self.quicksave_btn.pack(fill=tk.X, pady=(0, 4))
+
+        tk.Label(inner, text="PDF EXPORT", bg=C["sidebar"],
+                 fg=C["sidebar_muted"],
+                 font=("Helvetica", 8, "bold")).pack(anchor="w", pady=(16, 4))
+        dpi_row = tk.Frame(inner, bg=C["sidebar"])
+        dpi_row.pack(fill=tk.X)
+        tk.Label(dpi_row, text="Resolution", bg=C["sidebar"],
+                 fg=C["sidebar_text"],
+                 font=("Helvetica", 9)).pack(side=tk.LEFT)
+        self.dpi_var = tk.StringVar(value="300")
+        ttk.Combobox(dpi_row, textvariable=self.dpi_var,
+                     values=[str(d) for d in self.DPI_CHOICES],
+                     state="readonly", width=5,
+                     font=("Helvetica", 9)).pack(side=tk.RIGHT)
 
         tk.Frame(inner, bg=C["sidebar_border"], height=1).pack(
             fill=tk.X, pady=(0, 16))
@@ -233,7 +262,7 @@ class Doc2PDFApp:
 
         steps = [
             ("1", "Drop or open an image"),
-            ("2", "Click the 4 document\ncorners (TL → TR → BR → BL)"),
+            ("2", "Auto-detect or click the\n4 corners (TL→TR→BR→BL)"),
             ("3", "Drag corners to fine-tune"),
             ("4", "Export PDF"),
         ]
@@ -394,12 +423,25 @@ class Doc2PDFApp:
     # ── Resize handlers ───────────────────────────────────────────────────────
 
     def _on_source_resize(self, event):
+        if self._src_resize_job is not None:
+            self.root.after_cancel(self._src_resize_job)
+        self._src_resize_job = self.root.after(80, self._apply_source_resize)
+
+    def _apply_source_resize(self):
+        self._src_resize_job = None
         if self.img is None:
             self._draw_dropzone()
         else:
             self._redisplay_image()
 
     def _on_preview_resize(self, event):
+        if self._prev_resize_job is not None:
+            self.root.after_cancel(self._prev_resize_job)
+        self._prev_resize_job = self.root.after(120,
+                                                self._apply_preview_resize)
+
+    def _apply_preview_resize(self):
+        self._prev_resize_job = None
         if len(self.points) == 4 and self.img is not None:
             self.update_preview()
         else:
@@ -514,19 +556,35 @@ class Doc2PDFApp:
             self._load_path(path)
 
     def _load_path(self, path: str):
+        try:
+            img = Image.open(path)
+            transposed = ImageOps.exif_transpose(img)
+            if transposed is not None:
+                img = transposed
+            if img.mode != "RGB":
+                img = img.convert("RGB")
+            img.load()
+        except Exception as exc:
+            messagebox.showerror(
+                "Could not open image",
+                f"{os.path.basename(path)}\n\n{exc}",
+            )
+            return
         self.image_path = path
-        self.img_full = Image.open(path)
-        self._redisplay_image()
+        self.img_full = img
         self.points = []
+        self.dragging_point = None
         self._refresh_corner_indicators()
         self.save_btn.config(state=tk.DISABLED)
         self.quicksave_btn.config(state=tk.DISABLED)
+        self.detect_btn.config(state=tk.NORMAL)
         self.preview_canvas.delete("all")
         self._draw_preview_placeholder()
+        self._redisplay_image()
         self._set_status(
             f"Opened  ·  {os.path.basename(path)}"
-            f"  ({self.img_full.width}\u00d7{self.img_full.height})"
-            f"  ·  Click the 4 document corners"
+            f"  ({img.width}\u00d7{img.height})"
+            f"  ·  Click the 4 document corners or use Auto-detect"
         )
 
     def _redisplay_image(self):
@@ -564,11 +622,14 @@ class Doc2PDFApp:
             return
 
         # Add new point
-        self.points.append((event.x, event.y))
+        self.points.append(self._clamp_to_img(event.x, event.y))
         self._refresh_corner_indicators()
         self._redraw_overlay()
 
         if len(self.points) == 4:
+            self.points = self._order_quads(self.points)
+            self._refresh_corner_indicators()
+            self._redraw_overlay()
             self.save_btn.config(state=tk.NORMAL)
             self.quicksave_btn.config(state=tk.NORMAL)
             self.update_preview()
@@ -583,7 +644,7 @@ class Doc2PDFApp:
     def on_drag(self, event):
         if self.dragging_point is None:
             return
-        self.points[self.dragging_point] = (event.x, event.y)
+        self.points[self.dragging_point] = self._clamp_to_img(event.x, event.y)
         self._redraw_overlay()
         self.update_preview()
 
@@ -594,6 +655,7 @@ class Doc2PDFApp:
 
     def _reset_points(self):
         self.points = []
+        self.dragging_point = None
         self._refresh_corner_indicators()
         self._redraw_overlay()
         self.save_btn.config(state=tk.DISABLED)
@@ -602,6 +664,195 @@ class Doc2PDFApp:
         self._draw_preview_placeholder()
         if self.img:
             self._set_status("Corners reset  ·  Click the 4 document corners")
+
+    # ── Geometry / auto-detection ─────────────────────────────────────────────
+
+    def _clamp_to_img(self, x: float, y: float) -> tuple[int, int]:
+        """Keep a canvas coordinate inside the displayed thumbnail."""
+        if self.img is None:
+            return int(x), int(y)
+        xi = max(0, min(round(x), self.img.width))
+        yi = max(0, min(round(y), self.img.height))
+        return xi, yi
+
+    @staticmethod
+    def _order_quads(pts) -> list[tuple[int, int]]:
+        """Sort 4 points into TL, TR, BR, BL order."""
+        arr = np.asarray(pts, dtype="float32")
+        s = arr.sum(axis=1)
+        d = arr[:, 1] - arr[:, 0]
+        return [
+            tuple(np.round(arr[np.argmin(s)]).astype(int)),
+            tuple(np.round(arr[np.argmin(d)]).astype(int)),
+            tuple(np.round(arr[np.argmax(s)]).astype(int)),
+            tuple(np.round(arr[np.argmax(d)]).astype(int)),
+        ]
+
+    def autodetect_corners(self):
+        if self.img_full is None:
+            messagebox.showinfo("No image", "Open an image first.")
+            return
+        pts = self._detect_document_quad()
+        if pts is None:
+            messagebox.showwarning(
+                "No document detected",
+                "Could not find four document corners automatically.\n"
+                "Please click the corners manually.",
+            )
+            return
+        self.points = pts
+        self.dragging_point = None
+        self._refresh_corner_indicators()
+        self._redraw_overlay()
+        self.save_btn.config(state=tk.NORMAL)
+        self.quicksave_btn.config(state=tk.NORMAL)
+        self.update_preview()
+        self._set_status(
+            "Auto-detected corners"
+            "  ·  Drag to fine-tune  ·  Click Export PDF when ready")
+
+    def _detect_document_quad(self):
+        """Locate the dominant quadrilateral (document) in the image.
+
+        Works on a downscaled copy; returns corner points in canvas
+        thumbnail coordinates ordered TL/TR/BR/BL, or None when no
+        plausible document is found.
+        """
+        if self.img_full is None or self._scale <= 0:
+            return None
+        full = np.array(self.img_full)
+        h, w = full.shape[:2]
+        dscale = min(1.0, self.DETECT_MAX_DIM / max(h, w))
+        if dscale < 1.0:
+            small = cv2.resize(full, (round(w * dscale), round(h * dscale)),
+                               interpolation=cv2.INTER_AREA)
+        else:
+            small = full
+        gray = cv2.cvtColor(small, cv2.COLOR_RGB2GRAY)
+        gray = cv2.GaussianBlur(gray, (5, 5), 0)
+        img_area = float(small.shape[0] * small.shape[1])
+
+        def finish(q):
+            qo = self._order_quads(q.tolist())
+            f = 1.0 / (dscale * self._scale)
+            return [(round(x * f), round(y * f)) for x, y in qo]
+
+        k3 = np.ones((3, 3), np.uint8)
+
+        # Strategy 1: Canny edges (auto thresholds from the median, then
+        # classic fixed ones).  Only a gentle morphological close – heavy
+        # dilation merges unrelated edges into one giant blob whose
+        # bounding box is just the image bounds.
+        med = float(np.median(gray))
+        for lo, hi in ((int(max(0, 0.66 * med)), int(min(255, 1.33 * med))),
+                       (75, 200)):
+            e = cv2.Canny(gray, lo, hi)
+            e = cv2.morphologyEx(e, cv2.MORPH_CLOSE, k3, iterations=1)
+            cnts, _ = cv2.findContours(e, cv2.RETR_EXTERNAL,
+                                       cv2.CHAIN_APPROX_SIMPLE)
+            q = self._best_quad(cnts, img_area, gray)
+            if q is not None:
+                return finish(q)
+
+        # Strategy 2/3: bright-region segmentation (page is usually the
+        # brightest large region), adaptive then Otsu.
+        _, otsu = cv2.threshold(gray, 0, 255,
+                                cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        k7 = np.ones((7, 7), np.uint8)
+        for thr in (cv2.adaptiveThreshold(
+                        gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                        cv2.THRESH_BINARY, 35, 10),
+                    otsu):
+            t = cv2.morphologyEx(thr, cv2.MORPH_CLOSE, k7, iterations=2)
+            t = cv2.morphologyEx(t, cv2.MORPH_OPEN, k7)
+            cnts, _ = cv2.findContours(t, cv2.RETR_EXTERNAL,
+                                       cv2.CHAIN_APPROX_SIMPLE)
+            # Segmentation finds *any* bright blob, so demand much
+            # stronger evidence: a real page is far brighter than its
+            # immediate surround (measured ~170 vs <=18 for background).
+            q = self._best_quad(cnts, img_area, gray, min_contrast=35.0)
+            if q is None and cnts:
+                c = max(cnts, key=cv2.contourArea)
+                if cv2.contourArea(c) >= img_area * 0.15:
+                    q = self._quad_from_hull(c)
+                    if q is not None and not (
+                            self._quad_valid(q, img_area)
+                            and self._quad_contrast_ok(q, gray, 35.0)):
+                        q = None
+            if q is not None:
+                return finish(q)
+
+        return None
+
+    @staticmethod
+    def _best_quad(contours, img_area: float, gray: np.ndarray,
+                   min_frac: float = 0.06, min_contrast: float = 8.0):
+        """Largest *valid* convex 4-point approximation among contours."""
+        best = None
+        best_area = 0.0
+        for c in sorted(contours, key=cv2.contourArea, reverse=True)[:12]:
+            area = cv2.contourArea(c)
+            if area < img_area * min_frac or area <= best_area:
+                continue
+            peri = cv2.arcLength(c, True)
+            for eps in (0.02, 0.03, 0.04, 0.05):
+                ap = cv2.approxPolyDP(c, eps * peri, True)
+                if len(ap) != 4 or not cv2.isContourConvex(ap):
+                    continue
+                quad = ap.reshape(4, 2).astype("float32")
+                if not Doc2PDFApp._quad_valid(quad, img_area):
+                    continue
+                if not Doc2PDFApp._quad_contrast_ok(quad, gray,
+                                                    min_contrast):
+                    continue
+                best = quad
+                best_area = area
+                break
+        return best
+
+    @staticmethod
+    def _quad_from_hull(contour):
+        """Approximate a contour's convex hull down to exactly 4 points."""
+        hull = cv2.convexHull(contour)
+        peri = cv2.arcLength(hull, True)
+        for eps in (0.02, 0.03, 0.04, 0.05, 0.07, 0.09):
+            ap = cv2.approxPolyDP(hull, eps * peri, True)
+            if len(ap) == 4 and cv2.isContourConvex(ap):
+                return ap.reshape(4, 2).astype("float32")
+        return None
+
+    @staticmethod
+    def _quad_valid(quad: np.ndarray, img_area: float) -> bool:
+        """Reject degenerate suggestions: ~full-frame quads (= image
+        bounds, i.e. detection failure) and thin slivers."""
+        x = quad[:, 0].astype("float64")
+        y = quad[:, 1].astype("float64")
+        area = 0.5 * abs(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1)))
+        if not img_area * 0.06 <= area <= img_area * 0.97:
+            return False
+        sides = np.hypot(*(np.roll(quad, -1, axis=0) - quad).T)
+        if sides.min() < (img_area ** 0.5) * 0.05:
+            return False
+        return True
+
+    @staticmethod
+    def _quad_contrast_ok(quad: np.ndarray, gray: np.ndarray,
+                          min_delta: float = 8.0) -> bool:
+        """A document page is typically brighter than what immediately
+        surrounds it; candidates whose interior isn't brighter than a
+        thin band just outside their own edges are almost always
+        background texture."""
+        m = np.zeros(gray.shape, np.uint8)
+        cv2.fillPoly(m, [np.round(quad).astype(np.int32)], 255)
+        if not m.any() or m.all():
+            return False
+        ring = cv2.dilate(m, np.ones((19, 19), np.uint8))
+        band = (ring == 255) & (m == 0)
+        if not band.any():
+            return False
+        inside = float(gray[m == 255].mean())
+        outside = float(gray[band].mean())
+        return inside - outside >= min_delta
 
     # ── Overlay drawing ──────────────────────────────────────────────────────
 
@@ -697,41 +948,99 @@ class Doc2PDFApp:
 
     # ── PDF export ────────────────────────────────────────────────────────────
 
-    # A4 at 300 dpi: 210mm * 300/25.4 ≈ 2480px,  297mm * 300/25.4 ≈ 3508px
-    A4_DPI    = 300
-    A4_W_PX   = int(round(210 * A4_DPI / 25.4))   # 2480
-    A4_H_PX   = int(round(297 * A4_DPI / 25.4))   # 3508
+    @staticmethod
+    def _a4_px(dpi: int) -> tuple[int, int]:
+        """A4 page dimensions in pixels at the given dpi."""
+        return (int(round(210 * dpi / 25.4)), int(round(297 * dpi / 25.4)))
 
-    def _warp_to_a4(self) -> np.ndarray:
-        """Return a 300-dpi A4 warped image array (BGR)."""
-        s = self._scale
-        pts_src = np.array(
-            [(x * s, y * s) for x, y in self.points], dtype="float32"
-        )
-        img_cv = cv2.cvtColor(np.array(self.img_full), cv2.COLOR_RGB2BGR)
-        ow, oh = self.A4_W_PX, self.A4_H_PX
+    @staticmethod
+    def _warp_to_a4(img: Image.Image, pts_src: np.ndarray,
+                    out_w: int, out_h: int) -> np.ndarray:
+        """Perspective-warp img so pts_src fills an out_w×out_h page (BGR)."""
+        img_cv = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
         pts_dst = np.array(
-            [[0, 0], [ow - 1, 0], [ow - 1, oh - 1], [0, oh - 1]],
+            [[0, 0], [out_w - 1, 0], [out_w - 1, out_h - 1], [0, out_h - 1]],
             dtype="float32"
         )
         M = cv2.getPerspectiveTransform(pts_src, pts_dst)
-        return cv2.warpPerspective(img_cv, M, (ow, oh), flags=cv2.INTER_LANCZOS4)
+        return cv2.warpPerspective(img_cv, M, (out_w, out_h),
+                                   flags=cv2.INTER_LANCZOS4)
 
     def _write_pdf(self, warped: np.ndarray, pdf_path: str):
-        """Write a warped BGR array to a PDF file at A4 size."""
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
-            tmp = tf.name
+        """Write a warped BGR array to a PDF file at A4 size.
+
+        The page is embedded as JPEG so reportlab passes the compressed
+        DCT stream through verbatim; a lossless PNG embed would be many
+        times larger.
+        """
+        tmp = None
         try:
-            cv2.imwrite(tmp, warped, [cv2.IMWRITE_PNG_COMPRESSION, 6])
+            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tf:
+                tmp = tf.name
+            if not cv2.imwrite(tmp, warped,
+                               [cv2.IMWRITE_JPEG_QUALITY, self.JPEG_QUALITY]):
+                raise RuntimeError("Failed to encode the page as JPEG.")
             c = pdf_canvas.Canvas(pdf_path, pagesize=A4)
             c.drawImage(tmp, 0, 0, width=A4[0], height=A4[1],
                         preserveAspectRatio=False)
             c.showPage()
             c.save()
         finally:
-            os.remove(tmp)
+            if tmp and os.path.exists(tmp):
+                os.remove(tmp)
+
+    def _start_export(self, pdf_path: str, dpi: int):
+        """Snapshot the selection and run the export in a background thread."""
+        ow, oh = self._a4_px(dpi)
+        s = self._scale
+        pts_src = np.array([(x * s, y * s) for x, y in self.points],
+                           dtype="float32")
+        img_ref = self.img_full
+        self._exporting = True
+        self.detect_btn.config(state=tk.DISABLED)
+        self.save_btn.config(state=tk.DISABLED)
+        self.quicksave_btn.config(state=tk.DISABLED)
+        self._set_status(f"Exporting…  ({ow}\u00d7{oh}px @ {dpi} dpi)")
+        threading.Thread(
+            target=self._export_worker,
+            args=(img_ref, pts_src, ow, oh, dpi, pdf_path),
+            daemon=True,
+        ).start()
+
+    def _export_worker(self, img, pts_src, ow, oh, dpi, pdf_path):
+        try:
+            warped = self._warp_to_a4(img, pts_src, ow, oh)
+            self._write_pdf(warped, pdf_path)
+            self.root.after(0, self._export_finished,
+                            pdf_path, ow, oh, dpi, None)
+        except Exception as exc:
+            self.root.after(0, self._export_finished,
+                            pdf_path, ow, oh, dpi, str(exc))
+
+    def _export_finished(self, pdf_path, ow, oh, dpi, err):
+        # Widget updates must happen on the main thread (via root.after).
+        self._exporting = False
+        if not self.root.winfo_exists():
+            return
+        can_export = len(self.points) == 4 and self.img_full is not None
+        self.save_btn.config(
+            state=tk.NORMAL if can_export else tk.DISABLED)
+        self.quicksave_btn.config(
+            state=tk.NORMAL if can_export else tk.DISABLED)
+        self.detect_btn.config(
+            state=tk.NORMAL if self.img_full is not None else tk.DISABLED)
+        if err:
+            self._set_status("Export failed")
+            messagebox.showerror("Export failed", err)
+            return
+        self._set_status(
+            f"Exported  ·  {os.path.basename(pdf_path)}"
+            f"  ({ow}\u00d7{oh}px @ {dpi} dpi)")
+        messagebox.showinfo("PDF exported", f"Saved to:\n{pdf_path}")
 
     def generate_pdf(self):
+        if self._exporting:
+            return
         if len(self.points) != 4 or self.img_full is None:
             messagebox.showerror("Error", "Please select 4 corners first.")
             return
@@ -742,14 +1051,11 @@ class Doc2PDFApp:
         )
         if not pdf_path:
             return
-        self._write_pdf(self._warp_to_a4(), pdf_path)
-        self._set_status(
-            f"Exported  ·  {os.path.basename(pdf_path)}"
-            f"  ({self.A4_W_PX}\u00d7{self.A4_H_PX}px @ {self.A4_DPI} dpi)"
-        )
-        messagebox.showinfo("PDF exported", f"Saved to:\n{pdf_path}")
+        self._start_export(pdf_path, int(self.dpi_var.get()))
 
     def quicksave_pdf(self):
+        if self._exporting:
+            return
         if len(self.points) != 4 or self.img_full is None:
             messagebox.showerror("Error", "Please select 4 corners first.")
             return
@@ -760,11 +1066,7 @@ class Doc2PDFApp:
                 f"{os.path.basename(pdf_path)} already exists.\nOverwrite?"
             ):
                 return
-        self._write_pdf(self._warp_to_a4(), pdf_path)
-        self._set_status(
-            f"Saved  ·  {os.path.basename(pdf_path)}"
-            f"  ({self.A4_W_PX}\u00d7{self.A4_H_PX}px @ {self.A4_DPI} dpi)"
-        )
+        self._start_export(pdf_path, int(self.dpi_var.get()))
 
     def _default_pdf_path(self) -> str:
         """Return input path with .pdf extension."""

@@ -8,10 +8,12 @@ Load or drop an image, click the four document corners, and export.
 ## Features
 
 - Drag-and-drop image loading (requires `tkinterdnd2`, see below)
-- Click four corners to define the document boundary
+- Click four corners to define the document boundary, or one-click **Auto-detect** (edge detection)
 - Drag corners to fine-tune the selection
 - Live A4 perspective-corrected preview
-- Export to PDF fitted to DIN A4
+- Export to PDF fitted to DIN A4 — JPEG-compressed pages at selectable 150/200/300 dpi
+
+Requires Python 3.10+.
 
 ## Installation
 
@@ -50,7 +52,7 @@ python3 doc2pdf_gui.py
 ```
 
 1. Drop an image onto the canvas, or click **Open Image**
-2. Click the four corners of your document in order: **TL → TR → BR → BL**
+2. Click **Auto-detect**, or click the four corners of your document in order: **TL → TR → BR → BL**
 3. Drag any corner to adjust
 4. Click **Export PDF** and choose a save location
 
